@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blob Galaxy</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; font-family: Arial, sans-serif; }
+        canvas { display: block; background: #000; }
+        #ui { position: absolute; top: 10px; left: 10px; color: white; text-shadow: 1px 1px 2px black; z-index: 10; }
+        #gameOver { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; color: white; background: rgba(0,0,0,0.8); padding: 20px; border-radius: 10px; display: none; }
+        button { background: #0088cc; color: white; border: none; padding: 10px 20px; margin: 5px; border-radius: 5px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+    <div id="ui">
+        <div id="score">Размер: 15</div>
+        <div id="level">Уровень: 1</div>
+        <div id="timer">Время: 180</div>
+    </div>
+    <div id="gameOver">
+        <h2>Game Over!</h2>
+        <p id="finalScore"></p>
+        <button onclick="restartGame()">Играть снова</button>
+        <button onclick="shareScore()">Поделиться</button>
+    </div>
+
+    <script>
+        const tg = window.Telegram.WebApp;
+        tg.ready();
+        tg.expand(); // Полноэкранный режим
+
+        // Кнопки Telegram
+        tg.MainButton.text = "Поделиться результатом";
+        tg.MainButton.onClick(shareScore);
+        tg.MainButton.show();
+
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const scoreDisplay = document.getElementById('score');
+        const levelDisplay = document.getElementById('level');
+        const timerDisplay = document.getElementById('timer');
+        const gameOverDiv = document.getElementById('gameOver');
+        const finalScoreP = document.getElementById('finalScore');
+
+        // Адаптация под размер экрана Telegram
+        function resizeCanvas() {
+            canvas.width = tg.viewportWidth || 800;
+            canvas.height = tg.viewportHeight || 600;
+        }
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+
+        // Игрок
+        const player = {
+            x: canvas.width / 2,
+            y: canvas.height / 2,
+            radius: 15,
+            color: 'blue',
+            speed: 4,
+            invulnerable: true
+        };
+
+        // Еда и враги
+        const food = [];
+        const foodCount = 100;
+        const enemies = [];
+        let enemyCount = 5;
+
+        // Уровни
+        let currentLevel = 1;
+        const levelThresholds = [50, 100, 150, 200, 250];
+        let maxLevel = levelThresholds.length + 1;
+
+        // Таймер
+        let timeLeft = 180;
+        let gameOver = false;
+        let invulnerabilityTime = 2000;
+        const minRadius = 5;
+
+        // Фон (простой градиент для мобильных)
+        function drawBackground() {
+            const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            gradient.addColorStop(0, '#000033');
+            gradient.addColorStop(1, '#000066');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+
+        // Генерация еды
+        function spawnFood() {
+            food.length = 0;
+            for (let i = 0; i < foodCount; i++) {
+                food.push({
+                    x: Math.random() * canvas.width,
+                    y: Math.random() * canvas.height,
+                    radius: 3 + Math.random() * 4,
+                    color: `hsl(${Math.random() * 360}, 100%, 50%)`
+                });
+            }
+        }
+
+        // Генерация врагов
+        function spawnEnemies() {
+            enemies.length = 0;
+            for (let i = 0; i < enemyCount; i++) {
+                let x, y;
+                do {
+                    x = Math.random() * canvas.width;
+                    y = Math.random() * canvas.height;
+                } while (Math.hypot(x - player.x, y - player.y) < 200);
+                enemies.push({
+                    x, y,
+                    radius: 15 + Math.random() * (10 + currentLevel * 2),
+                    color: 'red',
+                    speed: 0.5 + Math.random() * (0.3 + currentLevel * 0.1),
+                    vx: (Math.random() - 0.5) * 1,
+                    vy: (Math.random() - 0.5) * 1
+                });
+            }
+        }
+
+        // Проверка уровня
+        function checkLevelUp() {
+            if (currentLevel < maxLevel) {
+                const threshold = levelThresholds[currentLevel - 1];
+                if (player.radius >= threshold) {
+                    currentLevel++;
+                    enemyCount += 2;
+                    spawnEnemies();
+                    tg.showAlert(`Уровень ${currentLevel}! Сложность увеличена.`);
+                    levelDisplay.textContent = `Уровень: ${currentLevel}`;
+                }
+            }
+        }
+
+        // Управление: тач/мышь для мобильных
+        let mouseX = player.x, mouseY = player.y;
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            mouseX = e.clientX - rect.left;
+            mouseY = e.clientY - rect.top;
+        });
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            const rect = canvas.getBoundingClientRect();
+            const touch = e.touches[0];
+            mouseX = touch.clientX - rect.left;
+            mouseY = touch.clientY - rect.top;
+        });
+
+        // Ускорение на клик/тап
+        let isBoosting = false;
+        canvas.addEventListener('mousedown', () => isBoosting = true);
+        canvas.addEventListener('mouseup', () => isBoosting = false);
+        canvas.addEventListener('touchstart', (e) => { e.preventDefault(); isBoosting = true; });
+        canvas.addEventListener('touchend', (e) => { e.preventDefault(); isBoosting = false; });
+
+        // Отрисовка блоба
+        function drawBlob(blob, isPlayer = false) {
+            const gradient = ctx.createRadialGradient(blob.x, blob.y, blob.radius * 0.2, blob.x, blob.y, blob.radius);
+            gradient.addColorStop(0, 'white');
+            gradient.addColorStop(1, blob.color);
+            ctx.beginPath();
+            ctx.arc(blob.x, blob.y, blob.radius, 0, Math.PI * 2);
+            ctx.fillStyle = gradient;
+            ctx.fill();
+            if (!isPlayer && blob.radius < player.radius) {
+                ctx.strokeStyle = 'yellow';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        }
+
+        // Игровой цикл
+        function gameLoop() {
+            if (gameOver) return;
+
+            drawBackground();
+            ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
+            ctx.shadowBlur = 10;
+            ctx.shadowOffsetX = 5;
+            ctx.shadowOffsetY = 5;
+
+            // Движение игрока
+            const dx = mouseX - player.x;
+            const dy = mouseY - player.y;
+            const distance = Math.hypot(dx, dy);
+            if (distance > 1) {
+                const speed = isBoosting ? player.speed * 2 : player.speed;
+                if (isBoosting && player.radius > 10) player.radius *= 0.995;
+                player.x += (dx / distance) * speed;
+                player.y += (dy / distance) * speed;
+            }
+            player.x = Math.max(player.radius, Math.min(canvas.width - player.radius, player.x));
+            player.y = Math.max(player.radius, Math.min(canvas.height - player.radius, player.y));
+
+            // Враги
+            enemies.forEach(enemy => {
+                if (Math.random() < 0.05 + (currentLevel * 0.01)) {
+                    const edx = player.x - enemy.x;
+                    const edy = player.y - enemy.y;
+                    const edist = Math.hypot(edx, edy);
+                    if (edist > 0) {
+                        enemy.vx = (edx / edist) * enemy.speed * 0.5 + (Math.random() - 0.5);
+                        enemy.vy = (edy / edist) * enemy.speed * 0.5 + (Math.random() - 0.5);
+                    }
+                }
+                enemy.x += enemy.vx;
+                enemy.y += enemy.vy;
+                if (enemy.x < enemy.radius || enemy.x > canvas.width - enemy.radius) enemy.vx *= -1;
+                if (enemy.y < enemy.radius || enemy.y > canvas.height - enemy.radius) enemy.vy *= -1;
+
+                // Столкновение
+                const distX = player.x - enemy.x;
+                const distY = player.y - enemy.y;
+                const dist = Math.hypot(distX, distY);
+                if (dist < player.radius + enemy.radius && !player.invulnerable) {
+                    player.radius -= enemy.radius * 0.2;
+                    if (player.radius < minRadius) {
+                        endGame();
+                        return;
+                    }
+                    enemy.x += (distX / dist) * 10;
+                    enemy.y += (distY / dist) * 10;
+                }
+            });
+
+            // Еда
+            food.forEach(f => {
+                const distX = player.x - f.x;
+                const distY = player.y - f.y;
+                const dist = Math.hypot(distX, distY);
+                if (dist < player.radius + f.radius) {
+                    player.radius += 0.5 - (currentLevel * 0.05);
+                    f.x = Math.random() * canvas.width;
+                    f.y = Math.random() * canvas.height;
+                    f.radius = 3 + Math.random() * 4;
+                    f.color = `hsl(${Math.random() * 360}, 100%, 50%)`;
+                    checkLevelUp();
+                }
+            });
+
+            // Отрисовка
+            food.forEach(f => drawBlob(f));
+            enemies.forEach(e => drawBlob(e));
+            drawBlob(player, true);
+            ctx.shadowColor = 'transparent';
+
+            // UI
+            scoreDisplay.textContent = `Размер: ${Math.floor(player.radius)}`;
+            levelDisplay.textContent = `Уровень: ${currentLevel}`;
+            timerDisplay.textContent = `Время: ${timeLeft}`;
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Таймер
+        setInterval(() => {
+            if (timeLeft > 0 && !gameOver) {
+                timeLeft--;
+                if (invulnerabilityTime > 0) {
+                    invulnerabilityTime -= 1000;
+                    if (invulnerabilityTime <= 0) player.invulnerable = false;
+                }
+                if (timeLeft === 0) endGame();
+            }
+        }, 1000);
+
+        // Конец игры
+        function endGame() {
+            gameOver = true;
+            finalScoreP.textContent = `Финальный размер: ${Math.floor(player.radius)} на уровне ${currentLevel}`;
+            gameOverDiv.style.display = 'block';
+            tg.MainButton.hide();
+        }
+
+        // Перезапуск
+        function restartGame() {
+            player.radius = 15;
+            player.x = canvas.width / 2;
+            player.y = canvas.height / 2;
+            player.invulnerable = true;
+            invulnerabilityTime = 2000;
+            currentLevel = 1;
+            enemyCount = 5;
+            timeLeft = 180;
+            gameOver = false;
+            spawnFood();
+            spawnEnemies();
+            gameOverDiv.style.display = 'none';
+            tg.MainButton.show();
+            gameLoop();
+        }
+
+        // Поделиться
+        function shareScore() {
+            tg.sendData(JSON.stringify({ score: Math.floor(player.radius), level: currentLevel }));
+            tg.showAlert(`Результат отправлен! Размер: ${Math.floor(player.radius)}`);
+        }
+
+        // Инициализация
+        spawnFood();
+        spawnEnemies();
+        gameLoop();
+    </script>
+</body>
+</html>
